@@ -1,0 +1,25 @@
+# Data files
+data/
+*.csv
+*.parquet
+*.json
+*.pkl
+*.npy
+*.h5
+
+# Large files
+*.bin
+*.dat
+*.model
+
+# Environment
+.env
+venv/
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
