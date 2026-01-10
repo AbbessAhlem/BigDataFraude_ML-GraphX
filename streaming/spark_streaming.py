@@ -1,90 +1,72 @@
-import os
-import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when, current_timestamp, from_json
-from pyspark.sql.types import StructType, StructField, DoubleType
-from pyspark.ml import PipelineModel
+from pyspark.sql.functions import col, lit, current_timestamp, when
+from pyspark.ml.pipeline import PipelineModel
+from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType, StringType
+import logging
 
-# --- Configuration Générale ---
-APP_NAME = "FraudDetectionStreamingKafka"
-CHECKPOINT_LOCATION = "file:///home/hadoop/streaming_checkpoint_kafka" 
-MODEL_PATH = "file:///tmp/spark_models/fraude_gbt_final_1767574836" 
+# --- 1. Initialisation Spark ---
+spark = SparkSession.builder \
+    .appName("Fraud_HDFS_Streaming") \
+    .getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
 
-# --- NOUVELLE Configuration Kafka ---
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"  
-KAFKA_TOPIC = "transactions_raw"            
-# -------------------------------------
+# --- 2. Chemins HDFS ---
+HDFS_STREAM_DIR = "hdfs://namenode:8020/user/fraud_detection/streaming"
+CHECKPOINT_DIR = "hdfs://namenode:8020/user/fraud_detection/checkpoints"
+OUTPUT_DIR = "hdfs://namenode:8020/user/fraud_detection/alerts"
 
-# --- Schéma des Données de Transaction ---
-data_schema = StructType([
-    StructField("Time", DoubleType(), True), StructField("V1", DoubleType(), True), StructField("V2", DoubleType(), True), 
-    StructField("V3", DoubleType(), True), StructField("V4", DoubleType(), True), StructField("V5", DoubleType(), True), 
-    StructField("V6", DoubleType(), True), StructField("V7", DoubleType(), True), StructField("V8", DoubleType(), True), 
-    StructField("V9", DoubleType(), True), StructField("V10", DoubleType(), True), StructField("V11", DoubleType(), True), 
-    StructField("V12", DoubleType(), True), StructField("V13", DoubleType(), True), StructField("V14", DoubleType(), True), 
-    StructField("V15", DoubleType(), True), StructField("V16", DoubleType(), True), StructField("V17", DoubleType(), True), 
-    StructField("V18", DoubleType(), True), StructField("V19", DoubleType(), True), StructField("V20", DoubleType(), True), 
-    StructField("V21", DoubleType(), True), StructField("V22", DoubleType(), True), StructField("V23", DoubleType(), True), 
-    StructField("V24", DoubleType(), True), StructField("V25", DoubleType(), True), StructField("V26", DoubleType(), True), 
-    StructField("V27", DoubleType(), True), StructField("V28", DoubleType(), True), StructField("Amount", DoubleType(), True)
-])
+# --- 3. Chargement du modèle ML (optionnel) ---
+ML_MODEL_PATH = "hdfs://namenode:8020/fraud_models/best_classifier_pipeline"
+try:
+    ml_model = PipelineModel.load(ML_MODEL_PATH)
+    logging.info("Modèle ML chargé avec succès.")
+except Exception as e:
+    logging.warning(f"Impossible de charger le modèle ML: {e}")
+    ml_model = None
 
+# --- 4. Schéma des transactions ---
+cols_pca = [StructField(f"V{i}", DoubleType(), True) for i in range(1,29)]
+schema = StructType([StructField("Transaction_ID", StringType(), True),
+                     StructField("Time", DoubleType(), True),
+                     StructField("Amount", DoubleType(), True)] + cols_pca + [StructField("Class", IntegerType(), True)])
 
-def start_streaming_job():
-    spark = SparkSession.builder.appName(APP_NAME).getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
-    print(f"Spark Session (version {spark.version}) démarrée pour le streaming Kafka.")
+# --- 5. Lecture streaming HDFS ---
+raw_stream = spark.readStream \
+    .schema(schema) \
+    .option("maxFilesPerTrigger", 1) \
+    .csv(HDFS_STREAM_DIR)
 
-    try:
-        model = PipelineModel.load(MODEL_PATH) 
-        print(f"Modèle ML chargé avec succès depuis {MODEL_PATH}")
-    except Exception as e:
-        print(f"Erreur FATALE lors du chargement du modèle. Vérifiez le chemin : {e}")
-        sys.exit(1)
-        
-    # --- Démarrage de la lecture depuis KAFKA ---
-    kafka_stream_raw = spark.readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
-        .option("subscribe", KAFKA_TOPIC) \
-        .option("startingOffsets", "latest") \
-        .load()
-    
-    print(f"Démarrage de la lecture en streaming à partir du Topic Kafka : {KAFKA_TOPIC}...")
+# --- 6. Fonction de règles simples ---
+def apply_rules(df):
+    THRESHOLD_AMOUNT = 2000.0
+    df = df.withColumn("Is_Alert", when(col("Amount") > THRESHOLD_AMOUNT, lit(True)).otherwise(lit(False)))
+    df = df.withColumn("Decision", when(col("Is_Alert"), lit("ALERT_HIGH_AMOUNT")).otherwise(lit("PASS")))
+    df = df.withColumn("Event_Time", current_timestamp())
+    return df
 
-    # Désérialisation du message Kafka (JSON)
-    kafka_stream_string = kafka_stream_raw.selectExpr("CAST(value AS STRING) as json_payload")
-    raw_stream = kafka_stream_string.select(from_json(col("json_payload"), data_schema).alias("data")) \
-        .select("data.*")
+stream_processed = apply_rules(raw_stream)
 
-    # Application du modèle 
-    prediction_stream = model.transform(raw_stream)
-
-    # Préparation du résultat
-    output_stream = prediction_stream.withColumn(
-        "fraud_status", 
-        when(col("prediction") == 1.0, "🔴 FRAUDE DÉTECTÉE (KAFKA)")
-        .otherwise("🟢 Légitime (KAFKA)")
-    ).select(
-        col("Time"), col("Amount"), col("prediction").alias("IsFraud"), col("fraud_status"),
-        current_timestamp().alias("processing_time")
+# --- 7. Optionnel : appliquer le modèle ML ---
+if ml_model:
+    stream_processed = ml_model.transform(stream_processed)  # ajoute 'prediction', 'probability', etc.
+    # Exemple : générer une alerte ML
+    stream_processed = stream_processed.withColumn(
+        "ML_Alert",
+        when(col("prediction") == 1, lit(True)).otherwise(lit(False))
     )
-    
-    # Définir le Sink
-    query = output_stream.writeStream \
-        .outputMode("append") \
-        .format("console") \
-        .trigger(processingTime="1 second") \
-        .option("checkpointLocation", CHECKPOINT_LOCATION) \
-        .start()
 
-    print("\n---------------------------------------------------------------------")
-    print(f"Pipeline de détection de fraude en temps réel (KAFKA) démarré.")
-    print(f"Surveillance du Topic : {KAFKA_TOPIC}")
-    print("Utilisez un producteur Kafka pour envoyer des messages JSON.")
-    print("---------------------------------------------------------------------")
-    
-    query.awaitTermination()
+# --- 8. Fusion des alertes règles + ML ---
+stream_processed = stream_processed.withColumn(
+    "Final_Alert",
+    when((col("Is_Alert") == True) | (col("ML_Alert") == True), lit(True)).otherwise(lit(False))
+)
 
-if __name__ == "__main__":
-    start_streaming_job()
+# --- 9. Écriture du flux vers HDFS ---
+query = stream_processed.writeStream \
+    .outputMode("append") \
+    .format("parquet") \
+    .option("path", OUTPUT_DIR) \
+    .option("checkpointLocation", CHECKPOINT_DIR) \
+    .start()
+
+query.awaitTermination()
