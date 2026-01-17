@@ -105,7 +105,7 @@ docker logs jupyter --tail 100
 4\. Exécution du Pipeline de Streaming
 
 **Exécutez ces commandes soit dans le terminal de Jupyter, soit via docker exec.**
-
+Remarque "Exécutez l'etape b et c dans 2 terminale différents"
 
 
 ### A. Installation des dépendances Python :
