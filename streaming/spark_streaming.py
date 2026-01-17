@@ -1,72 +1,75 @@
+#!/usr/bin/env python3
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, current_timestamp, when
-from pyspark.ml.pipeline import PipelineModel
-from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType, StringType
-import logging
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
-# --- 1. Initialisation Spark ---
+print("🚀 Starting Fraud Detection Streaming (Fixed Ambiguity Mode)...")
+
+# Initialize Spark Session with Kafka support
 spark = SparkSession.builder \
-    .appName("Fraud_HDFS_Streaming") \
+    .appName("FraudStreamKafka") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
     .getOrCreate()
-spark.sparkContext.setLogLevel("WARN")
 
-# --- 2. Chemins HDFS ---
-HDFS_STREAM_DIR = "hdfs://namenode:8020/user/fraud_detection/streaming"
-CHECKPOINT_DIR = "hdfs://namenode:8020/user/fraud_detection/checkpoints"
-OUTPUT_DIR = "hdfs://namenode:8020/user/fraud_detection/alerts"
+spark.sparkContext.setLogLevel("ERROR")
 
-# --- 3. Chargement du modèle ML (optionnel) ---
-ML_MODEL_PATH = "hdfs://namenode:8020/fraud_models/best_classifier_pipeline"
-try:
-    ml_model = PipelineModel.load(ML_MODEL_PATH)
-    logging.info("Modèle ML chargé avec succès.")
-except Exception as e:
-    logging.warning(f"Impossible de charger le modèle ML: {e}")
-    ml_model = None
+# 1. Clean Schema - Using DoubleType for Class to prevent NULL parsing errors
+schema = StructType([
+    StructField("Amount", DoubleType()),
+    StructField("Class", DoubleType()), 
+    StructField("timestamp", DoubleType())
+])
 
-# --- 4. Schéma des transactions ---
-cols_pca = [StructField(f"V{i}", DoubleType(), True) for i in range(1,29)]
-schema = StructType([StructField("Transaction_ID", StringType(), True),
-                     StructField("Time", DoubleType(), True),
-                     StructField("Amount", DoubleType(), True)] + cols_pca + [StructField("Class", IntegerType(), True)])
+# 2. Read from Kafka using internal Docker network
+df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "kafka:9092") \
+    .option("subscribe", "credit-card-transactions") \
+    .load()
 
-# --- 5. Lecture streaming HDFS ---
-raw_stream = spark.readStream \
-    .schema(schema) \
-    .option("maxFilesPerTrigger", 1) \
-    .csv(HDFS_STREAM_DIR)
+# 3. Parse JSON and fix NULL/Case issues
+# coalesce(col("Class"), lit(0)) ensures we never have a NULL status
+df_parsed = df.selectExpr("CAST(value AS STRING) as json_str") \
+    .select(from_json(col("json_str"), schema).alias("data")) \
+    .select("data.*") \
+    .withColumn("valid_class", coalesce(col("Class"), lit(0)))
 
-# --- 6. Fonction de règles simples ---
-def apply_rules(df):
-    THRESHOLD_AMOUNT = 2000.0
-    df = df.withColumn("Is_Alert", when(col("Amount") > THRESHOLD_AMOUNT, lit(True)).otherwise(lit(False)))
-    df = df.withColumn("Decision", when(col("Is_Alert"), lit("ALERT_HIGH_AMOUNT")).otherwise(lit("PASS")))
-    df = df.withColumn("Event_Time", current_timestamp())
-    return df
+# 4. Add Fraud Logic - Maps numerical Class to 'fraud'/'normal' tags for Grafana
+output = df_parsed.withColumn("current_time", current_timestamp()) \
+    .withColumn("type", when(col("valid_class") >= 1, "fraud").otherwise("normal")) \
+    .withColumn("fraud_flag", when(col("valid_class") >= 1, 1).otherwise(0))
 
-stream_processed = apply_rules(raw_stream)
-
-# --- 7. Optionnel : appliquer le modèle ML ---
-if ml_model:
-    stream_processed = ml_model.transform(stream_processed)  # ajoute 'prediction', 'probability', etc.
-    # Exemple : générer une alerte ML
-    stream_processed = stream_processed.withColumn(
-        "ML_Alert",
-        when(col("prediction") == 1, lit(True)).otherwise(lit(False))
+# 5. Function to send data to InfluxDB using the 'transactions' bucket
+def send_to_influx(batch_df, batch_id):
+    # Ensure URL uses service name 'influxdb' for Docker communication
+    client = InfluxDBClient(
+        url="http://influxdb:8086", 
+        token="fraud-detection-token-2024", 
+        org="fraud-detection"
     )
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+    
+    rows = batch_df.collect()
+    for row in rows:
+        point = Point("transactions") \
+            .tag("type", row["type"]) \
+            .field("amount", float(row["Amount"])) \
+            .field("fraud", int(row["fraud_flag"]))
+        
+        # Writing specifically to the 'transactions' bucket
+        write_api.write(bucket="transactions", record=point)
+    client.close()
 
-# --- 8. Fusion des alertes règles + ML ---
-stream_processed = stream_processed.withColumn(
-    "Final_Alert",
-    when((col("Is_Alert") == True) | (col("ML_Alert") == True), lit(True)).otherwise(lit(False))
-)
+# 6. SINK A: Console (For Real-time Debugging of NULLs)
+console_query = output.select("current_time", "Amount", "valid_class", "type").writeStream \
+    .outputMode("append").format("console").start()
 
-# --- 9. Écriture du flux vers HDFS ---
-query = stream_processed.writeStream \
-    .outputMode("append") \
-    .format("parquet") \
-    .option("path", OUTPUT_DIR) \
-    .option("checkpointLocation", CHECKPOINT_DIR) \
+# 7. SINK B: InfluxDB
+influx_query = output.writeStream \
+    .foreachBatch(send_to_influx) \
     .start()
 
-query.awaitTermination()
+print("🟢 ACTIVE! Watch the console for 'fraud' labels...")
+spark.streams.awaitAnyTermination()

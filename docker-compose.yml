@@ -1,4 +1,7 @@
+version: '3.8'
+
 services:
+  # Hadoop NameNode
   namenode:
     image: bde2020/hadoop-namenode:latest
     container_name: namenode
@@ -13,6 +16,7 @@ services:
     networks:
       - bigdata
 
+  # Hadoop DataNode
   datanode:
     image: bde2020/hadoop-datanode:latest
     container_name: datanode
@@ -26,6 +30,7 @@ services:
     networks:
       - bigdata
 
+  # Spark Master
   spark-master:
     image: bde2020/spark-master:latest
     container_name: spark-master
@@ -37,6 +42,7 @@ services:
     networks:
       - bigdata
 
+  # Spark Worker
   spark-worker:
     image: bde2020/spark-worker:latest
     container_name: spark-worker
@@ -47,8 +53,9 @@ services:
     networks:
       - bigdata
 
+  # Jupyter Notebook
   jupyter:
-    image: jupyter/pyspark-notebook:latest
+    image: jupyter/all-spark-notebook:latest
     container_name: jupyter
     depends_on:
       - spark-master
@@ -56,19 +63,91 @@ services:
     ports:
       - "8888:8888"
     volumes:
-      - .:/home/jovyan/work
+      - ./data:/home/jovyan/data
+      - ./notebooks:/home/jovyan/notebooks
+      - ./streaming:/home/jovyan/streaming
     environment:
       - JUPYTER_ENABLE_LAB=yes
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=python3
     networks:
       - bigdata
 
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - bigdata
+
+  # Grafana
   grafana:
     image: grafana/grafana:10.3.3
     container_name: grafana
     ports:
-      - "3001:3000"
+      - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - bigdata
+
+  # InfluxDB
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123456
+      - DOCKER_INFLUXDB_INIT_ORG=fraud-detection
+      - DOCKER_INFLUXDB_INIT_BUCKET=transactions
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=fraud-detection-token-2024
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - bigdata
+
+
+
+  # Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - bigdata
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
       - bigdata
 
@@ -76,6 +155,7 @@ volumes:
   namenode_data:
   datanode_data:
   grafana_data:
+  influxdb_data:
 
 networks:
   bigdata:

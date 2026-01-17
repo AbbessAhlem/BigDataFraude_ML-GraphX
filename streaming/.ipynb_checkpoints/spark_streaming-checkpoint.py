@@ -1,113 +1,110 @@
-import os
-import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when, current_timestamp
-from pyspark.sql.types import StructType, StructField, DoubleType
+from pyspark.sql.functions import col, from_unixtime, floor, rand, lit, when
 from pyspark.ml import PipelineModel
+import time
 
-# --- Configuration ---
-APP_NAME = "FraudDetectionStreaming"
-INPUT_DIR = "file:///home/hadoop/streaming_input"           # AJOUT DE file://
-CHECKPOINT_LOCATION = "file:///home/hadoop/streaming_checkpoint" # AJOUT DE file://
-MODEL_PATH = "file:///tmp/spark_models/fraude_gbt_final_1767574836" 
+# ---------------------------
+# Configuration Spark
+# ---------------------------
+spark = SparkSession.builder \
+    .appName("FraudStreamingFull") \
+    .config("spark.jars.packages", "org.postgresql:postgresql:42.7.3") \
+    .getOrCreate()
 
+spark.sparkContext.setLogLevel("WARN")
 
-# CHEMIN FINAL CORRIGÉ ET VÉRIFIÉ DU MODÈLE
-MODEL_PATH = "file:///tmp/spark_models/fraude_gbt_final_1767574836" 
-# --- Schéma des Données de Transaction ---
-data_schema = StructType([
-    StructField("Time", DoubleType(), True),
-    StructField("V1", DoubleType(), True),
-    StructField("V2", DoubleType(), True),
-    StructField("V3", DoubleType(), True),
-    StructField("V4", DoubleType(), True),
-    StructField("V5", DoubleType(), True),
-    StructField("V6", DoubleType(), True),
-    StructField("V7", DoubleType(), True),
-    StructField("V8", DoubleType(), True),
-    StructField("V9", DoubleType(), True),
-    StructField("V10", DoubleType(), True),
-    StructField("V11", DoubleType(), True),
-    StructField("V12", DoubleType(), True),
-    StructField("V13", DoubleType(), True),
-    StructField("V14", DoubleType(), True),
-    StructField("V15", DoubleType(), True),
-    StructField("V16", DoubleType(), True),
-    StructField("V17", DoubleType(), True),
-    StructField("V18", DoubleType(), True),
-    StructField("V19", DoubleType(), True),
-    StructField("V20", DoubleType(), True),
-    StructField("V21", DoubleType(), True),
-    StructField("V22", DoubleType(), True),
-    StructField("V23", DoubleType(), True),
-    StructField("V24", DoubleType(), True),
-    StructField("V25", DoubleType(), True),
-    StructField("V26", DoubleType(), True),
-    StructField("V27", DoubleType(), True),
-    StructField("V28", DoubleType(), True),
-    StructField("Amount", DoubleType(), True)
-])
+# ---------------------------
+# Chemins HDFS
+# ---------------------------
+predictions_path = "hdfs://namenode:8020/data/predictions"
+model_path = "hdfs://namenode:8020/data/models/fraude_gbt_final_1768303385"
+graphx_path = "hdfs://namenode:8020/data/graphx"
 
+# ---------------------------
+# Charger le modèle
+# ---------------------------
+model = PipelineModel.load(model_path)
 
-def start_streaming_job():
-    """Démarre le job de Spark Structured Streaming pour la détection de fraude."""
+# ---------------------------
+# Configuration PostgreSQL
+# ---------------------------
+jdbc_url = "jdbc:postgresql://postgres:5432/fraud_db?ssl=false"
+db_table = "transactions"
+db_properties = {
+    "user": "fraud_user",
+    "password": "fraud_pass",
+    "driver": "org.postgresql.Driver"
+}
 
-    # Initialisation de la session Spark
-    spark = SparkSession.builder \
-        .appName(APP_NAME) \
-        .getOrCreate()
-    
-    spark.sparkContext.setLogLevel("ERROR")
-    print(f"Spark Session (version {spark.version}) démarrée pour le streaming.")
+# Liste de commerçants simulés pour PageRank
+merchants = ["Amazon", "Ebay", "Walmart", "Carrefour", "Fnac", "AliExpress"]
 
-    # 1. Charger le modèle ML entraîné
-    try:
-        # La vérification de placeholder a été retirée pour éviter l'erreur de syntaxe
-        model = PipelineModel.load(MODEL_PATH) 
-        print(f"Modèle ML chargé avec succès depuis {MODEL_PATH}")
-    except Exception as e:
-        print(f"Erreur FATALE lors du chargement du modèle. Vérifiez le chemin : {e}")
-        sys.exit(1)
-        
-    # 2. Définir la source de streaming (Lecture de fichiers CSV entrants)
-    raw_stream = spark.readStream.schema(data_schema)
-    raw_stream = raw_stream.option("maxFilesPerTrigger", 1)
-    raw_stream = raw_stream.option("header", "true")
-    raw_stream = raw_stream.csv(INPUT_DIR)
-        
-    print(f"Démarrage de la lecture en streaming à partir de {INPUT_DIR}...")
+# Intervalle de streaming simulé
+interval_sec = 10
 
-    # 3. Application du modèle à la volée (le 'transform' est une opération de streaming valide)
-    prediction_stream = model.transform(raw_stream)
+# ---------------------------
+# Boucle de streaming simulé
+# ---------------------------
+while True:
+    # Lire les nouvelles transactions
+    df = spark.read.parquet(predictions_path)
 
-    # 4. Préparer le résultat pour la sortie
-    output_stream = prediction_stream.withColumn(
-        "fraud_status", 
-        when(col("prediction") == 1.0, "🔴 FRAUDE DÉTECTÉE")
-        .otherwise("🟢 Légitime")
-    ).select(
-        col("Time"),
-        col("Amount"),
-        col("prediction").alias("IsFraud"),
-        col("fraud_status"),
-        current_timestamp().alias("processing_time")
+    # Prédiction avec le modèle
+    df_pred = model.transform(df) \
+        .withColumn("predicted_fraud", col("prediction").cast("integer")) \
+        .withColumn("fraud_probability", col("probability")[1]) \
+        .withColumn("amount", col("features")[29]) \
+        .withColumn("ts", from_unixtime(col("features")[0])) \
+        .withColumn("merchant", merchants[floor(rand() * len(merchants))])
+
+    # Calcul métriques simples pour monitoring
+    df_metrics = df_pred.withColumn(
+        "accuracy",
+        when(col("predicted_fraud") == col("label"), 1).otherwise(0)
+    ).select("ts", "amount", "label", "predicted_fraud", "fraud_probability", "merchant", "accuracy")
+
+    # Écriture dans PostgreSQL
+    df_metrics.write.jdbc(
+        url=jdbc_url,
+        table=db_table,
+        mode="append",
+        properties=db_properties
     )
-    
-    # 5. Définir le Sink (destination : la console pour le monitoring)
-    query = output_stream.writeStream \
-        .outputMode("append") \
-        .format("console") \
-        .trigger(processingTime="5 seconds") \
-        .option("checkpointLocation", CHECKPOINT_LOCATION) \
-        .start()
 
-    print("\n---------------------------------------------------------------------")
-    print(f"Pipeline de détection de fraude en temps réel démarré, surveillant : {INPUT_DIR}")
-    print("Pour simuler l'arrivée de données, copiez des lignes de votre CSV dans un nouveau fichier (.csv) dans ce répertoire.")
-    print("Appuyez sur Ctrl+C pour arrêter le job de streaming.")
-    print("---------------------------------------------------------------------")
-    
-    query.awaitTermination()
+    print(f"✅ {df_metrics.count()} lignes envoyées vers PostgreSQL")
 
-if __name__ == "__main__":
-    start_streaming_job()
+    # ---------------------------
+    # PageRank pour commerçants les plus à risque (top N)
+    # ---------------------------
+    from graphframes import GraphFrame
+
+    # Créer graph simple : nodes = merchants, edges = transactions frauduleuses
+    vertices = df_pred.select(col("merchant").alias("id")).distinct()
+    edges = df_pred.filter(col("predicted_fraud") == 1) \
+        .select(col("merchant").alias("src"), col("merchant").alias("dst"), col("amount"))
+
+    g = GraphFrame(vertices, edges)
+    pr = g.pageRank(resetProbability=0.15, maxIter=5)
+    pr_vertices = pr.vertices.select(col("id").alias("merchant"), col("pagerank").alias("PR_Score"))
+
+    # Joindre avec montants frauduleux
+    top_merchants = pr_vertices.join(
+        df_pred.filter(col("predicted_fraud") == 1)
+            .groupBy("merchant")
+            .sum("amount")
+            .withColumnRenamed("sum(amount)", "total_amount"),
+        on="merchant"
+    ).orderBy(col("PR_Score").desc()).limit(5)
+
+    # Écrire top merchants dans PostgreSQL (table top_merchants)
+    top_merchants.write.jdbc(
+        url=jdbc_url,
+        table="top_merchants",
+        mode="overwrite",
+        properties=db_properties
+    )
+
+    print("✅ Top 5 commerçants à risque mis à jour")
+
+    # Pause avant la prochaine itération
+    time.sleep(interval_sec)
