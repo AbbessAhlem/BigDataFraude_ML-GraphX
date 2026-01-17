@@ -152,7 +152,7 @@ Jupyter Notebook : http://localhost:8888
 
 
 
-Grafana (Dashboards) : http://localhost:3000 (Login: admin / admin)
+Grafana (Dashboards) : http://localhost:3000 
 
 
 
