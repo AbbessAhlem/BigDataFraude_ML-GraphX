@@ -1,0 +1,86 @@
+# Configuration Spark Streaming
+app_name: "FraudDetectionStreaming"
+master: "spark://spark-master:7077"
+checkpoint_location: "/tmp/spark_streaming_checkpoint"
+
+# Source Kafka
+kafka:
+  bootstrap_servers: "kafka:9092"
+  topic: "transactions"
+  starting_offsets: "latest"
+  max_offsets_per_trigger: 1000
+  fail_on_data_loss: "false"
+
+# Traitement
+processing:
+  trigger_interval: "10 seconds"
+  watermark: "5 minutes"
+  output_mode: "update"
+  foreachBatch_parallelism: 2
+
+# Modèle ML
+ml:
+  model_path: "hdfs://namenode:8020/data/models/fraud_gbt_model"
+  threshold: 0.85
+  feature_columns:
+    - "Time"
+    - "V1"
+    - "V2"
+    - "V3"
+    - "V4"
+    - "V5"
+    - "V6"
+    - "V7"
+    - "V8"
+    - "V9"
+    - "V10"
+    - "V11"
+    - "V12"
+    - "V13"
+    - "V14"
+    - "V15"
+    - "V16"
+    - "V17"
+    - "V18"
+    - "V19"
+    - "V20"
+    - "V21"
+    - "V22"
+    - "V23"
+    - "V24"
+    - "V25"
+    - "V26"
+    - "V27"
+    - "V28"
+    - "Amount"
+
+# Sorties
+output:
+  console: true
+  hdfs_path: "hdfs://namenode:8020/data/streaming_output"
+  fraud_alerts_path: "hdfs://namenode:8020/data/fraud_alerts"
+  metrics_path: "hdfs://namenode:8020/data/streaming_metrics"
+  kafka_output_topic: "fraud_alerts"
+  foreach_sink: true
+
+# Monitoring
+monitoring:
+  enable_metrics: true
+  metrics_interval: "30 seconds"
+  enable_query_progress_tracking: true
+  log_query_progress: true
+
+# Performance
+performance:
+  shuffle_partitions: 2
+  default_parallelism: 2
+  backpressure_enabled: true
+  max_rate_per_partition: 100
+  mini_batch_enabled: true
+
+# Retry & Fault Tolerance
+fault_tolerance:
+  max_retries: 3
+  retry_interval: "10 seconds"
+  enable_checkpointing: true
+  checkpoint_cleanup: true

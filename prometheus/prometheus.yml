@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'hadoop-namenode'
+    static_configs:
+      - targets: ['namenode:8080'] # This matches the JMX port we discussed earlier

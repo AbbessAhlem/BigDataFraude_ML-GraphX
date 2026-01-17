@@ -1,0 +1,11 @@
+groups:
+  - name: spark_alerts
+    rules:
+      - alert: SparkMasterDown
+        expr: up{job="spark-master"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Spark Master is down"
+          description: "Spark Master has been down for more than 1 minute."
